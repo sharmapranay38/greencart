@@ -3,7 +3,10 @@ import Order from '../models/Order.js';
 import Stripe from 'stripe';
 import User from '../models/User.js';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null;
+const isStripeEnabled = Boolean(stripeSecretKey);
 
 // Place Order COD : /api/order/cod
 export const placeOrderCOD = async (req, res) => {
@@ -62,14 +65,32 @@ export const placeOrderStripe = async (req, res) => {
 
         amount += Math.floor(amount * 0.02); // Tax
 
-        const order = await Order.create({
+        const baseOrderPayload = {
             userId,
             items,
             amount,
             address,
             paymentType: "Online",
             isPaid: false
-        });
+        };
+
+        // Simulated checkout when Stripe is not configured
+        if (!isStripeEnabled || !stripe) {
+            const simulatedOrder = await Order.create({
+                ...baseOrderPayload,
+                paymentType: "Online (Demo)",
+                isPaid: true
+            });
+            await User.findByIdAndUpdate(userId, { cartItems: {} });
+            return res.json({
+                success: true,
+                simulated: true,
+                message: "Payment processed successfully (demo mode).",
+                orderId: simulatedOrder._id
+            });
+        }
+
+        const order = await Order.create(baseOrderPayload);
 
         // Stripe line items
         const line_items = productData.map(item => ({
@@ -104,6 +125,9 @@ export const placeOrderStripe = async (req, res) => {
 
 // Stripe Webhooks to verify payments : /stripe
 export const stripeWebhooks = async (req, res) => {
+    if (!isStripeEnabled || !stripe || !stripeWebhookSecret) {
+        return res.status(200).json({ received: true, simulated: true });
+    }
     const sig = req.headers["stripe-signature"];
     let event;
     try {
